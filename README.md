@@ -4,6 +4,12 @@ A lightweight, fully automated command-line utility to deploy and manage [Frigat
 
 This script eliminates the resource overhead and nesting requirements of running Docker-in-LXC by creating an LXC container directly from the official Frigate OCI image.
 
+![](images/screenshot2.png)
+
+![](images/screenshot1.png)
+
+![](images/screenshot3.png)
+
 ## Features
 
 * **Zero Docker Overhead**: Boots the Frigate OCI image natively as a lightweight unprivileged LXC container.
