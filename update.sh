@@ -141,17 +141,16 @@ if [ "$PULL_REQUIRED" = true ]; then
             rm -f "$TEMPLATE_PATH"
         fi
 
-        UPID=$(pvesh create "/nodes/localhost/storage/${TEMPLATE_STORAGE}/oci-registry-pull" \
+        PVE_OUT=$(pvesh create "/nodes/localhost/storage/${TEMPLATE_STORAGE}/oci-registry-pull" \
             --reference "$FRIGATE_IMAGE" \
             --filename "$OCI_TEMPLATE_NAME" \
-            --output-format json 2>/dev/null | python3 -c 'import sys, json; print(json.load(sys.stdin))' 2>/dev/null || echo "")
+            --output-format json 2>/dev/null || echo "")
 
-        if [ -z "$UPID" ]; then
-            # Fallback if stdout returned raw string
-            UPID=$(pvesh create "/nodes/localhost/storage/${TEMPLATE_STORAGE}/oci-registry-pull" \
-                --reference "$FRIGATE_IMAGE" \
-                --filename "$OCI_TEMPLATE_NAME" \
-                --output-format text | awk '{print $NF}' || echo "")
+        UPID=$(echo "$PVE_OUT" | python3 -c 'import sys, json; print(json.load(sys.stdin))' 2>/dev/null || echo "")
+
+        if [ -z "$UPID" ] || [[ ! "$UPID" =~ ^UPID: ]]; then
+            # Fallback if JSON parsing failed or stdout returned raw string
+            UPID=$(echo "$PVE_OUT" | grep -o 'UPID:[^[:space:]"]*' | head -n 1 || echo "")
         fi
 
         if [ -z "$UPID" ] || [[ ! "$UPID" =~ ^UPID: ]]; then
