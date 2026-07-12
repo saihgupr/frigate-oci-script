@@ -607,9 +607,11 @@ DESCRIPTION=$(echo -e "# Frigate OCI Script
 **Quick Access**
 | Service | URL |
 | :--- | :--- |
-| Web UI | http://${IP_ADDRESS}:5000 |
+| Web UI & API (Unauthenticated) | http://${IP_ADDRESS}:5000 |
+| Web UI & API (Recommended) | https://${IP_ADDRESS}:8971 |
 | go2rtc API | http://${IP_ADDRESS}:1984 |
-| Frigate Auth | https://${IP_ADDRESS}:8971 |
+
+*Note: Port 8971 is the secure WebUI and API port and is recommended to be used in every case. Port 5000 is unauthenticated.*
 
 **Hardware Profile**
 - GPU Acceleration: ${GPU_TYPE}
@@ -661,8 +663,10 @@ echo "Image Tag:      $FRIGATE_IMAGE"
 echo "Config Path:    $HOST_CONFIG_PATH/config.yml"
 echo "Media Path:     $HOST_MEDIA_PATH"
 echo ""
-echo -e "Frigate Web UI:  http://${IP_ADDRESS}:5000"
-echo -e "go2rtc Web UI:   http://${IP_ADDRESS}:1984"
-echo -e "Frigate API/TLS: https://${IP_ADDRESS}:8971"
+echo -e "Web UI & API (Unauthenticated): http://${IP_ADDRESS}:5000"
+echo -e "Web UI & API (Recommended):     https://${IP_ADDRESS}:8971"
+echo -e "go2rtc Web UI:                  http://${IP_ADDRESS}:1984"
+echo ""
+echo -e "${YELLOW}NOTE: Port 8971 is the secure (authenticated/TLS) WebUI and API port and is recommended to be used in every case.${NC}"
 echo ""
 echo "Enjoy your Docker-less Frigate setup!"
