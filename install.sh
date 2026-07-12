@@ -267,6 +267,14 @@ else
     # Post-Install Snapshot
     read -p "Create a post-installation snapshot of the container? (Y/n): " create_snapshot_choice
     create_snapshot_choice=${create_snapshot_choice:-Y}
+
+    # Final confirmation
+    echo ""
+    read -p "Ready to begin the installation? (Y/n): " start_install_choice
+    start_install_choice=${start_install_choice:-Y}
+    if [[ ! "$start_install_choice" =~ ^[Yy]$ ]]; then
+        error_exit "Installation cancelled by user."
+    fi
 fi
 
 # Validation (applicable to both interactive and silent)
