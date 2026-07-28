@@ -516,6 +516,7 @@ else
         elif [ "$CORAL_TYPE" = "usb" ]; then
             cat >> "$LXC_CONF" << EOF
 lxc.cgroup2.devices.allow: c 189:* rwm
+lxc.cgroup2.devices.allow: c 120:* rwm
 lxc.mount.entry: /dev/bus/usb dev/bus/usb none bind,optional,create=dir
 EOF
             log_success "Configured USB bus passthrough for USB Coral."
