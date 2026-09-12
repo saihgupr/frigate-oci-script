@@ -393,6 +393,22 @@ else
     pct destroy "$TEMP_ID" || log_warn "Failed to destroy temporary container."
 fi
 
+# Configure systemd auto-restart override for native OCI lifecycle
+log_step "Ensuring container auto-restart service override is configured..."
+if [ "$DRY_RUN" = true ]; then
+    log_info "[DRY RUN] Would create systemd override at /etc/systemd/system/pve-container@${CT_ID}.service.d/override.conf"
+else
+    OVERRIDE_DIR="/etc/systemd/system/pve-container@${CT_ID}.service.d"
+    mkdir -p "$OVERRIDE_DIR"
+    cat > "${OVERRIDE_DIR}/override.conf" << EOF
+[Service]
+Restart=always
+RestartSec=2s
+EOF
+    systemctl daemon-reload
+    log_success "Auto-restart override configured for CT ${CT_ID}"
+fi
+
 # Start updated container
 if [ "$WAS_RUNNING" = true ]; then
     log_step "Starting updated container $CT_ID..."
