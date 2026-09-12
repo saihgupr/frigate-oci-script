@@ -642,6 +642,22 @@ EOF
     log_success "Hookscript configured and registered in $LXC_CONF"
 fi
 
+# Configure systemd auto-restart override for native OCI lifecycle
+log_step "Configuring container auto-restart service override..."
+if [ "$DRY_RUN" = true ]; then
+    log_info "[DRY RUN] Would create systemd override at /etc/systemd/system/pve-container@${CT_ID}.service.d/override.conf"
+else
+    OVERRIDE_DIR="/etc/systemd/system/pve-container@${CT_ID}.service.d"
+    mkdir -p "$OVERRIDE_DIR"
+    cat > "${OVERRIDE_DIR}/override.conf" << EOF
+[Service]
+Restart=always
+RestartSec=2s
+EOF
+    systemctl daemon-reload
+    log_success "Auto-restart override configured for CT ${CT_ID}"
+fi
+
 
 # 8. Start Container
 log_step "Starting Frigate container $CT_ID..."
