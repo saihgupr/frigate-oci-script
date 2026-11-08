@@ -12,6 +12,8 @@ CUSTOM_MOUNT_CONTAINER=""
 CT_ID=""
 CT_HOSTNAME=""
 CLI_MEDIA_PATH=""
+CLI_DNS=""
+CLI_NET_VLAN=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +45,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --media-path)
             CLI_MEDIA_PATH="$2"
+            shift 2
+            ;;
+        --dns)
+            CLI_DNS="$2"
+            shift 2
+            ;;
+        --vlan)
+            CLI_NET_VLAN="$2"
             shift 2
             ;;
         *)
@@ -99,6 +109,14 @@ run_cmd() {
     else
         "$@"
     fi
+}
+
+# Return the host's upstream DNS servers, skipping loopback stubs that would
+# not be reachable from inside the container.
+detect_host_dns() {
+    awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null \
+        | grep -vE '^127\.' \
+        | paste -sd' ' - || true
 }
 
 # Set terminal title
@@ -214,8 +232,10 @@ if [ "$NON_INTERACTIVE" = true ]; then
     HOST_CONFIG_PATH="/opt/frigate/config"
     HOST_MEDIA_PATH="${CLI_MEDIA_PATH:-/opt/frigate/media}"
     NET_BRIDGE="vmbr0"
+    NET_VLAN="$CLI_NET_VLAN"
     NET_IP="dhcp"
     NET_GW=""
+    NET_DNS="${CLI_DNS:-$(detect_host_dns)}"
     configure_gpu="Y"
     configure_coral="Y"
     create_snapshot_choice="Y"
@@ -283,6 +303,9 @@ else
     read -p "Enter Network Bridge (default: vmbr0): " NET_BRIDGE
     NET_BRIDGE=${NET_BRIDGE:-vmbr0}
 
+    read -p "Enter VLAN Tag (1-4094, leave empty for none${CLI_NET_VLAN:+, default: $CLI_NET_VLAN}): " NET_VLAN
+    NET_VLAN=${NET_VLAN:-$CLI_NET_VLAN}
+
     read -p "Enter IP Address (e.g. 192.168.1.204/24 or 'dhcp', default: dhcp): " NET_IP
     NET_IP=${NET_IP:-dhcp}
 
@@ -290,6 +313,10 @@ else
     if [ "$NET_IP" != "dhcp" ]; then
         read -p "Enter Default Gateway (e.g. 192.168.1.1): " NET_GW
     fi
+
+    HOST_DNS_DEFAULT="${CLI_DNS:-$(detect_host_dns)}"
+    read -p "Enter DNS servers, space separated (default: ${HOST_DNS_DEFAULT:-host defaults}): " NET_DNS
+    NET_DNS=${NET_DNS:-$HOST_DNS_DEFAULT}
 
     # Post-Install Snapshot
     read -p "Create a post-installation snapshot of the container? (Y/n): " create_snapshot_choice
@@ -307,6 +334,18 @@ fi
 # Validation (applicable to both interactive and silent)
 if [[ ! "$CT_ID" =~ ^[0-9]+$ ]] || [ "$CT_ID" -lt 100 ] || [ "$CT_ID" -gt 999 ]; then
     error_exit "Invalid Container ID. Must be between 100 and 999."
+fi
+
+if [ -n "$NET_DNS" ]; then
+    for dns_server in $NET_DNS; do
+        if [[ ! "$dns_server" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            error_exit "Invalid DNS server '$dns_server'."
+        fi
+    done
+fi
+
+if [ -n "$NET_VLAN" ] && { [[ ! "$NET_VLAN" =~ ^[0-9]+$ ]] || [ "$NET_VLAN" -lt 1 ] || [ "$NET_VLAN" -gt 4094 ]; }; then
+    error_exit "Invalid VLAN tag '$NET_VLAN'. Must be between 1 and 4094."
 fi
 
 if [ "$DRY_RUN" = false ] && pct status "$CT_ID" &>/dev/null; then
@@ -440,16 +479,24 @@ fi
 log_step "Creating LXC Container $CT_ID..."
 # Note that we append .tar to reference the downloaded file
 if [ "$DRY_RUN" = true ]; then
-    log_info "[DRY RUN] Would create LXC container $CT_ID using template ${TEMPLATE_STORAGE}:vztmpl/${OCI_TEMPLATE_NAME}.tar"
+    log_info "[DRY RUN] Would create LXC container $CT_ID using template ${TEMPLATE_STORAGE}:vztmpl/${OCI_TEMPLATE_NAME}.tar on bridge ${NET_BRIDGE}${NET_VLAN:+ (VLAN $NET_VLAN)}"
 else
     # Build net0 configuration
     NET0_CONF="name=eth0,bridge=$NET_BRIDGE,ip=$NET_IP"
+    if [ -n "$NET_VLAN" ]; then
+        NET0_CONF="${NET0_CONF},tag=${NET_VLAN}"
+    fi
     if [ "$NET_IP" != "dhcp" ]; then
         if [ -n "$NET_GW" ]; then
             NET0_CONF="${NET0_CONF},gw=${NET_GW}"
         fi
     fi
     NET0_CONF="${NET0_CONF},host-managed=1"
+
+    NAMESERVER_ARGS=()
+    if [ -n "$NET_DNS" ]; then
+        NAMESERVER_ARGS=(--nameserver "$NET_DNS")
+    fi
 
     pct create "$CT_ID" "${TEMPLATE_STORAGE}:vztmpl/${OCI_TEMPLATE_NAME}.tar" \
         --hostname "$CT_HOSTNAME" \
@@ -458,6 +505,7 @@ else
         --swap "$CT_SWAP" \
         --rootfs "${CT_STORAGE}:${CT_DISK}" \
         --net0 "$NET0_CONF" \
+        "${NAMESERVER_ARGS[@]}" \
         --onboot 1 \
         --ostype unmanaged \
         --unprivileged 1 || error_exit "Failed to create container."
@@ -470,7 +518,7 @@ log_step "Preparing host directories and initial config..."
 if [ "$DRY_RUN" = true ]; then
     log_info "[DRY RUN] Would create host directories $HOST_CONFIG_PATH and $HOST_MEDIA_PATH"
     log_info "[DRY RUN] Would create default config.yml at $HOST_CONFIG_PATH/config.yml"
-    log_info "[DRY RUN] Would chown/chmod directories for unprivileged user (UID 100000)"
+    log_info "[DRY RUN] Would set ownership of the mount roots (not recursive) to UID 100000"
 else
     mkdir -p "$HOST_CONFIG_PATH" "$HOST_MEDIA_PATH"
 
@@ -507,12 +555,49 @@ EOF
         log_info "Existing config.yml found. Keeping it."
     fi
 
-    # Ensure correct permissions on host directories for unprivileged access
-    # LXC unprivileged container starts root mapped to host UID 100000 by default.
-    # Make the host mount paths readable/writable by UID 100000.
-    log_info "Adjusting directory permissions for unprivileged mappings (UID 100000)..."
-    chown -R 100000:100000 "$HOST_CONFIG_PATH" "$HOST_MEDIA_PATH"
-    chmod -R 775 "$HOST_CONFIG_PATH" "$HOST_MEDIA_PATH"
+    # Ensure correct permissions for unprivileged access.
+    # LXC unprivileged containers map root to host UID 100000, so the mount roots
+    # must be writable by that UID. Only the mount roots and our own config file
+    # are touched: recursing here would rewrite ownership and modes of existing
+    # data on shares, ZFS datasets and network mounts.
+    APPLY_PERMS=true
+    if [ -d "$HOST_MEDIA_PATH" ] && [ -n "$(ls -A "$HOST_MEDIA_PATH" 2>/dev/null)" ]; then
+        MEDIA_OWNER=$(stat -c '%u' "$HOST_MEDIA_PATH" 2>/dev/null || echo "0")
+        if [ "$MEDIA_OWNER" != "100000" ]; then
+            log_warn "$HOST_MEDIA_PATH already contains data (owned by UID $MEDIA_OWNER)."
+            if [ "$NON_INTERACTIVE" = true ]; then
+                log_warn "Non-interactive mode: leaving existing media permissions untouched."
+                APPLY_PERMS=false
+            else
+                read -p "Adjust ownership of $HOST_MEDIA_PATH to UID 100000? (y/N): " perms_choice
+                if [[ ! "$perms_choice" =~ ^[Yy]$ ]]; then
+                    log_info "Keeping existing media permissions. Frigate may not be able to write there."
+                    APPLY_PERMS=false
+                fi
+            fi
+        fi
+    fi
+
+    if [ "$APPLY_PERMS" = true ]; then
+        log_info "Adjusting directory permissions for unprivileged mappings (UID 100000)..."
+        for mount_path in "$HOST_CONFIG_PATH" "$HOST_MEDIA_PATH"; do
+            chown 100000:100000 "$mount_path" 2>/dev/null \
+                || log_warn "Could not change ownership of $mount_path. Continuing without it."
+            chmod 775 "$mount_path" 2>/dev/null \
+                || log_warn "Could not change permissions of $mount_path. Continuing without it."
+        done
+    else
+        log_info "Adjusting permissions on $HOST_CONFIG_PATH only (UID 100000)..."
+        chown 100000:100000 "$HOST_CONFIG_PATH" 2>/dev/null \
+            || log_warn "Could not change ownership of $HOST_CONFIG_PATH. Continuing without it."
+        chmod 775 "$HOST_CONFIG_PATH" 2>/dev/null \
+            || log_warn "Could not change permissions of $HOST_CONFIG_PATH. Continuing without it."
+    fi
+
+    if [ -f "$HOST_CONFIG_PATH/config.yml" ]; then
+        chown 100000:100000 "$HOST_CONFIG_PATH/config.yml" 2>/dev/null || true
+        chmod 664 "$HOST_CONFIG_PATH/config.yml" 2>/dev/null || true
+    fi
 fi
 
 # 7. Configure LXC container parameters
@@ -536,33 +621,53 @@ else
     fi
 
     # Add GPU Passthrough
+    DEV_SLOT=0
     if [[ "$configure_gpu" =~ ^[Yy]$ && "$GPU_TYPE" != "none" ]]; then
         log_info "Configuring $GPU_TYPE hardware acceleration passthrough..."
         echo "" >> "$LXC_CONF"
         echo "# Frigate Hardware Acceleration" >> "$LXC_CONF"
         
         if [[ "$GPU_TYPE" =~ ^(intel|amd|vaapi)$ ]]; then
-            # Map all DRI devices under /dev/dri/ to support QSV surface allocation
-            dev_slot=0
-            for dev in /dev/dri/*; do
-                if [ -c "$dev" ]; then
-                    dev_gid=$(stat -c '%g' "$dev" 2>/dev/null || echo "0")
-                    echo "dev${dev_slot}: $dev,gid=$dev_gid,mode=0666" >> "$LXC_CONF"
-                    log_success "Mapped $dev (GID $dev_gid) to dev${dev_slot}"
-                    dev_slot=$((dev_slot + 1))
+            # Map one render node and its paired card node. On SR-IOV hosts
+            # /dev/dri holds a node per virtual function, and mapping them all
+            # takes the remaining VFs away from every other guest.
+            DRI_RENDER=""
+            if [ -c "/dev/dri/renderD128" ]; then
+                DRI_RENDER="/dev/dri/renderD128"
+            else
+                DRI_RENDER=$(find /dev/dri -maxdepth 1 -type c -name 'renderD*' 2>/dev/null | sort -V | head -n 1 || true)
+            fi
+
+            if [ -n "$DRI_RENDER" ]; then
+                DRI_INDEX="${DRI_RENDER##*renderD}"
+                DRI_CARD="/dev/dri/card$((10#$DRI_INDEX - 128))"
+
+                for dev in "$DRI_CARD" "$DRI_RENDER"; do
+                    if [ -c "$dev" ]; then
+                        dev_gid=$(stat -c '%g' "$dev" 2>/dev/null || echo "0")
+                        echo "dev${DEV_SLOT}: $dev,gid=$dev_gid,mode=0666" >> "$LXC_CONF"
+                        log_success "Mapped $dev (GID $dev_gid) to dev${DEV_SLOT}"
+                        DEV_SLOT=$((DEV_SLOT + 1))
+                    fi
+                done
+
+                DRI_TOTAL=$(find /dev/dri -maxdepth 1 -type c 2>/dev/null | wc -l)
+                if [ "$DRI_TOTAL" -gt "$DEV_SLOT" ]; then
+                    log_warn "$DRI_TOTAL DRI devices found; mapped only ${DRI_CARD} and ${DRI_RENDER}. Add more to $LXC_CONF if Frigate needs them."
                 fi
-            done
+            else
+                log_warn "No DRI render node found. Skipping GPU passthrough."
+            fi
             echo "lxc.apparmor.profile: unconfined" >> "$LXC_CONF"
             
         elif [ "$GPU_TYPE" = "nvidia" ]; then
             echo "lxc.apparmor.profile: unconfined" >> "$LXC_CONF"
             nvidia_devs=("/dev/nvidia0" "/dev/nvidiactl" "/dev/nvidia-modeset" "/dev/nvidia-uvm" "/dev/nvidia-uvm-tools")
-            dev_slot=0
             for dev in "${nvidia_devs[@]}"; do
                 if [ -c "$dev" ]; then
                     dev_gid=$(stat -c '%g' "$dev" 2>/dev/null || echo "0")
-                    echo "dev${dev_slot}: $dev,gid=$dev_gid" >> "$LXC_CONF"
-                    dev_slot=$((dev_slot + 1))
+                    echo "dev${DEV_SLOT}: $dev,gid=$dev_gid" >> "$LXC_CONF"
+                    DEV_SLOT=$((DEV_SLOT + 1))
                 fi
             done
             log_success "Mapped Nvidia devices and set AppArmor unconfined."
@@ -577,7 +682,7 @@ else
         
         if [ "$CORAL_TYPE" = "pcie" ]; then
             APEX_GID=$(stat -c '%g' /dev/apex_0 2>/dev/null || echo "0")
-            echo "dev2: /dev/apex_0,gid=$APEX_GID" >> "$LXC_CONF"
+            echo "dev${DEV_SLOT}: /dev/apex_0,gid=$APEX_GID" >> "$LXC_CONF"
             log_success "Mapped /dev/apex_0 (GID $APEX_GID) for PCIe Coral."
         elif [ "$CORAL_TYPE" = "usb" ]; then
             cat >> "$LXC_CONF" << EOF
@@ -595,47 +700,57 @@ EOF
     mkdir -p "$SNIPPETS_DIR"
     HOOKSCRIPT_PATH="${SNIPPETS_DIR}/ct${CT_ID}-network.sh"
 
+    # NET_CMD runs inside the container's network namespace. "$CT_PID" has to stay
+    # literal here so the generated bash -c block expands it when the hook fires.
     if [ "$NET_IP" = "dhcp" ]; then
-        NET_CMD="nsenter -t \"\\\$CT_PID\" -n dhclient eth0 2>/dev/null || nsenter -t \"\\\$CT_PID\" -n udhcpc -i eth0 2>/dev/null"
+        # host-managed=1 already runs the DHCP client on the host side, so the
+        # hookscript only has to bring interfaces up and flush IPv6.
+        NET_CMD=""
     else
-        NET_CMD="nsenter -t \"\\\$CT_PID\" -n ip addr add $NET_IP dev eth0 2>/dev/null
-        nsenter -t \"\\\$CT_PID\" -n ip route add default via $NET_GW 2>/dev/null"
+        NET_CMD="nsenter -t \"\$CT_PID\" -n ip addr replace $NET_IP dev eth0 2>/dev/null
+        nsenter -t \"\$CT_PID\" -n ip route replace default via $NET_GW 2>/dev/null"
     fi
 
-    cat > "$HOOKSCRIPT_PATH" << EOF
+    # Quoted heredoc: the file is written verbatim and placeholders are substituted
+    # afterwards, so no escaping is needed and nothing expands at install time.
+    HOOKSCRIPT_TEMPLATE=$(cat <<'HOOKEOF'
 #!/bin/bash
-# Proxmox hookscript: configure network and flush IPv6 for CT \${CT_ID}
+# Proxmox hookscript: configure network and flush IPv6 for CT __CT_ID__
 
-VMID="\\\$1"
-PHASE="\\\$2"
+VMID="$1"
+PHASE="$2"
 
-if [ "\\\$VMID" != "$CT_ID" ] || [ "\\\$PHASE" != "post-start" ]; then
+if [ "$VMID" != "__CT_ID__" ] || [ "$PHASE" != "post-start" ]; then
     exit 0
 fi
 
 # Run in background via setsid to release PVE startup task immediately
 setsid bash -c '
     for i in {1..50}; do
-        CT_PID=\\\$(lxc-info -n $CT_ID -p -H 2>/dev/null)
-        if [ -n "\\\$CT_PID" ]; then
+        CT_PID=$(lxc-info -n __CT_ID__ -p -H 2>/dev/null)
+        if [ -n "$CT_PID" ]; then
             break
         fi
         sleep 0.05
     done
-    if [ -n "\\\$CT_PID" ]; then
-        echo \"ct\${CT_ID}-network: configuring network inside PID \\\$CT_PID...\"
-        nsenter -t \"\\\$CT_PID\" -n sysctl -w net.ipv6.conf.all.disable_ipv6=1
-        nsenter -t \"\\\$CT_PID\" -n sysctl -w net.ipv6.conf.default.disable_ipv6=1
-        nsenter -t \"\\\$CT_PID\" -n sysctl -w net.ipv6.conf.eth0.disable_ipv6=1
-        nsenter -t \"\\\$CT_PID\" -n ip link set lo up
-        nsenter -t \"\\\$CT_PID\" -n ip link set eth0 up
-        $NET_CMD
-        echo \"ct\${CT_ID}-network: network configured successfully\"
+    if [ -n "$CT_PID" ]; then
+        echo "ct__CT_ID__-network: configuring network inside PID $CT_PID..."
+        nsenter -t "$CT_PID" -n sysctl -w net.ipv6.conf.all.disable_ipv6=1
+        nsenter -t "$CT_PID" -n sysctl -w net.ipv6.conf.default.disable_ipv6=1
+        nsenter -t "$CT_PID" -n sysctl -w net.ipv6.conf.eth0.disable_ipv6=1
+        nsenter -t "$CT_PID" -n ip link set lo up
+        nsenter -t "$CT_PID" -n ip link set eth0 up
+        __NET_CMD__
+        echo "ct__CT_ID__-network: network configured successfully"
     fi
-' > /var/log/ct\${CT_ID}-network.log 2>&1 &
+' > /var/log/ct__CT_ID__-network.log 2>&1 &
 
 exit 0
-EOF
+HOOKEOF
+)
+    HOOKSCRIPT_TEMPLATE=${HOOKSCRIPT_TEMPLATE//__CT_ID__/$CT_ID}
+    HOOKSCRIPT_TEMPLATE=${HOOKSCRIPT_TEMPLATE//__NET_CMD__/$NET_CMD}
+    printf '%s\n' "$HOOKSCRIPT_TEMPLATE" > "$HOOKSCRIPT_PATH"
 
     chmod +x "$HOOKSCRIPT_PATH"
     echo "hookscript: local:snippets/ct${CT_ID}-network.sh" >> "$LXC_CONF"
@@ -707,6 +822,8 @@ DESCRIPTION=$(echo -e "# Frigate OCI Script
 **Hardware Profile**
 - GPU Acceleration: ${GPU_TYPE}
 ${CORAL_LINE}- Resources: ${CT_RAM}MB RAM / ${CT_CORES} CPU Cores
+- Network: ${NET_BRIDGE}${NET_VLAN:+ (VLAN ${NET_VLAN})}
+- DNS: ${NET_DNS:-host defaults}
 
 **File Locations**
 - Configuration: ${HOST_CONFIG_PATH}/config.yml
@@ -753,6 +870,12 @@ echo "Hostname:       $CT_HOSTNAME"
 echo "Image Tag:      $FRIGATE_IMAGE"
 echo "Config Path:    $HOST_CONFIG_PATH/config.yml"
 echo "Media Path:     $HOST_MEDIA_PATH"
+if [ -n "$NET_VLAN" ]; then
+    echo "VLAN Tag:       $NET_VLAN"
+fi
+if [ -n "$NET_DNS" ]; then
+    echo "DNS Servers:    $NET_DNS"
+fi
 echo ""
 echo -e "Web UI & API (Unauthenticated): http://${IP_ADDRESS}:5000"
 echo -e "Web UI & API (Recommended):     https://${IP_ADDRESS}:8971"
