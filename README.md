@@ -60,12 +60,14 @@ When running the installer manually, you can pass parameters to customize or aut
 | `--id <CTID>` | Specify the target Container ID (100–999) | `bash install.sh --id 999` |
 | `--hostname <name>` | Specify the container hostname | `bash install.sh --hostname frigate` |
 | `--mount <host>:<guest>` | Configure a custom external storage bind mount | `bash install.sh --mount /mnt/data:/opt/storage` |
+| `--dns <servers>` | Space-separated DNS servers for the container (default: the host's) | `bash install.sh --dns "192.168.1.1 1.1.1.1"` |
+| `--vlan <id>` | Tag the container's network interface with a VLAN ID (1–4094) | `bash install.sh --vlan 20` |
 
 #### What the installer does:
-1. Prompts for container ID, hostname, CPU/RAM, and target storage.
+1. Prompts for container ID, hostname, CPU/RAM, target storage and network settings.
 2. Invokes the Proxmox API (`oci-registry-pull`) to download and cache the OCI image.
 3. Automatically sets up the container configuration with `--ostype unmanaged`.
-4. Creates host storage directories and configures bind mounts (`/config` and `/media/frigate`).
+4. Creates host storage directories and configures bind mounts (`/config` and `/media/frigate`). Only the mount roots are chowned to UID 100000; existing data inside a media path is never rewritten. Non-interactive runs leave a pre-populated media path untouched.
 5. Automates hardware and TPU passthroughs in `/etc/pve/lxc/<CTID>.conf`.
 
 ### 2. Updating Frigate
