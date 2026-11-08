@@ -532,14 +532,18 @@ mqtt:
 detectors:
   ov:
     type: openvino
-    device: CPU
-    model:
-      width: 300
-      height: 300
-      input_tensor: nhwc
-      input_pixel_format: bgr
-      path: /openvino-model/ssdlite_mobilenet_v2.xml
-      labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+    device: AUTO
+
+# Frigate 0.15+ expects the model block at the top level, not nested under the
+# detector. Nesting it there makes the OpenVINO detector compile a broken model
+# and crash on first start.
+model:
+  width: 300
+  height: 300
+  input_tensor: nhwc
+  input_pixel_format: bgr
+  path: /openvino-model/ssdlite_mobilenet_v2.xml
+  labelmap_path: /openvino-model/coco_91cl_bkgr.txt
 
 cameras:
   dummy_camera:
