@@ -117,6 +117,21 @@ pct enter <CTID>
 ```
 This drops you directly into a bash session inside the container.
 
+### Stopping or Removing the Container
+The installer sets `Restart=always` on `pve-container@<CTID>.service` so the container survives a reboot. That also means `pct stop` is followed by an immediate restart, and `pct destroy` refuses with "container is running".
+
+Mask the unit first, then stop and remove the container:
+
+```bash
+systemctl mask pve-container@<CTID>.service
+pct stop <CTID>
+pct destroy <CTID>
+systemctl unmask pve-container@<CTID>.service
+systemctl reset-failed pve-container@<CTID>.service
+```
+
+For a complete cleanup, also remove `/etc/systemd/system/pve-container@<CTID>.service.d/override.conf` and `/var/lib/vz/snippets/ct<CTID>-network.sh`.
+
 ### Config File
 The Frigate configuration file is located on the Proxmox host at `/opt/frigate/config/config.yml` (or your chosen host bind-mount path). You can edit this file on the host using `nano` or upload your configuration directly. Once edited, restart the container via:
 
