@@ -18,7 +18,7 @@ This script eliminates the resource overhead and nesting requirements of running
 * **Google Coral Support**: Seamless passthrough for both PCIe Coral (Apex) and USB Coral TPUs.
 * **WebRTC & Network Hookscript**: Automatically provisions a background `post-start` network hookscript to configure the loopback interface, static routes, and flush IPv6 addresses inside the container namespace, enabling flawless out-of-the-box `go2rtc` WebRTC streaming.
 * **State Persistence**: Mounts host directories for configuration and media files, ensuring no data loss when container is recreated.
-* **Auto-Restart Lifecycle**: Automatically configures a systemd host service override (`Restart=always`) so that internal restarts (such as clicking restart in Frigate's WebUI or saving config) automatically bring the container back up seamlessly like Docker without powering down.
+* **Auto-Restart Lifecycle**: Automatically configures a systemd host service override (`Restart=always`) so that internal restarts (such as clicking restart in Frigate's WebUI or saving config) automatically bring the container back up seamlessly like Docker without powering down. The same override re-runs the network `post-start` hookscript, so DHCP and static networking recover after an internal restart.
 * **Seamless Upgrades**: An intelligent `update.sh` script that automates container teardown, pulls the new OCI template, and recreates the container while restoring all environment variables, resources, and hardware passthrough configurations.
 
 ---

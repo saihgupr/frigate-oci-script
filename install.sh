@@ -761,6 +761,74 @@ HOOKEOF
     log_success "Hookscript configured and registered in $LXC_CONF"
 fi
 
+# Install the host-managed DHCP helper used by the auto-restart override.
+# pct start runs this after the hookscript; a systemd restart skips that
+# path, so the override calls the helper as well. It waits for the normal
+# DHCP client first, then only starts one if the interface still has no IP.
+if [ "$DRY_RUN" = true ]; then
+    log_info "[DRY RUN] Would install /usr/local/bin/frigate-ct-dhcp"
+else
+    log_step "Installing host-managed DHCP helper..."
+    cat > /usr/local/bin/frigate-ct-dhcp <<'PERLEOF'
+#!/usr/bin/perl
+use strict;
+use warnings;
+use PVE::LXC;
+use PVE::LXC::Config;
+
+$| = 1;
+
+my $vmid = shift @ARGV;
+exit 0 if !defined($vmid) || $vmid !~ /^\d+$/;
+
+my $conf = eval { PVE::LXC::Config->load_config($vmid) };
+exit 0 if !$conf;
+
+my @managed;
+for my $k (sort keys %$conf) {
+    next if $k !~ /^net\d+$/;
+    my $d = eval { PVE::LXC::Config->parse_lxc_network($conf->{$k}) };
+    next if !$d || !$d->{'host-managed'} || !$d->{name};
+    push @managed, [$d->{name}, 4] if defined($d->{ip}) && $d->{ip} eq 'dhcp';
+    push @managed, [$d->{name}, 6] if defined($d->{ip6}) && $d->{ip6} eq 'dhcp';
+}
+exit 0 if !@managed;
+
+# Give pct start's own DHCP client time to run first. On a systemd
+# auto-restart that path is bypassed, so this is the only client that runs.
+sleep 5;
+
+my $pid;
+for (1 .. 5) {
+    ($pid) = eval { PVE::LXC::open_lxc_pid($vmid) };
+    last if $pid;
+    sleep 1;
+}
+exit 0 if !$pid;
+
+my $rootdir = "/proc/$pid/root";
+
+for my $item (@managed) {
+    my ($eth, $version) = @$item;
+    my $pattern = $version == 4 ? qr/\binet\s/ : qr/\binet6\s+.*\bscope global\b/;
+    my $out = '';
+    if (open my $fh, '-|', 'nsenter', '-t', $pid, '-n', 'ip', "-$version", 'addr', 'show', 'dev', $eth) {
+        local $/;
+        $out = <$fh> // '';
+        close $fh;
+    }
+    next if $out =~ $pattern;
+
+    print "starting host-managed DHCPv$version for $eth\n";
+    eval { PVE::LXC::manage_dhclient('start', $vmid, $version, $eth, $rootdir) };
+    print "DHCPv$version failed: $@" if $@;
+}
+
+exit 0;
+PERLEOF
+    chmod +x /usr/local/bin/frigate-ct-dhcp
+fi
+
 # Configure systemd auto-restart override for native OCI lifecycle
 log_step "Configuring container auto-restart service override..."
 if [ "$DRY_RUN" = true ]; then
@@ -772,6 +840,10 @@ else
 [Service]
 Restart=always
 RestartSec=2s
+# pct start runs the network hookscript, but a systemd restart relaunches
+# lxc-start directly. Run the same post-start hook here and make sure a
+# host-managed DHCP client starts if the normal pct path was skipped.
+ExecStartPost=/bin/sh -c 'test -x /var/lib/vz/snippets/ct%i-network.sh && /var/lib/vz/snippets/ct%i-network.sh %i post-start; setsid /usr/local/bin/frigate-ct-dhcp %i >>/var/log/ct%i-network.log 2>&1 &'
 EOF
     systemctl daemon-reload
     log_success "Auto-restart override configured for CT ${CT_ID}"
