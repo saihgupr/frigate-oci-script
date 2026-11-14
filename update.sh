@@ -410,10 +410,19 @@ if [ -z "$TEMP_ID" ] || [ "$TEMP_ID" = "$CT_ID" ]; then
     done
 fi
 
-# Take a safety snapshot on active container
+# Take a safety snapshot on active container. The timestamp keeps the name
+# unique so a repeat update to the same version still gets a fresh snapshot
+# instead of matching the previous one and being skipped.
+SNAPSHOT_SUFFIX="$(date +%Y%m%d_%H%M%S)"
 CLEAN_VERSION=$(echo "$VERSION" | tr '.-' '__')
-SNAPSHOT_NAME="pre_to_${CLEAN_VERSION}"
+# Keep the whole name inside Proxmox's 40 character snapshot name limit,
+# leaving room for the "pre_to_" prefix and the timestamp suffix.
+CLEAN_VERSION=${CLEAN_VERSION:0:$((40 - 7 - 1 - ${#SNAPSHOT_SUFFIX}))}
+SNAPSHOT_NAME="pre_to_${CLEAN_VERSION}_${SNAPSHOT_SUFFIX}"
 log_step "Taking safety snapshot: $SNAPSHOT_NAME..."
+if grep -qF "[pre_to_${CLEAN_VERSION}" "$LXC_CONF" 2>/dev/null; then
+    log_info "Keeping existing snapshot from a previous update to $VERSION and taking a fresh one."
+fi
 if [ "$DRY_RUN" = true ]; then
     log_info "[DRY RUN] Would create snapshot '$SNAPSHOT_NAME' for container $CT_ID"
 else

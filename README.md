@@ -98,7 +98,7 @@ The updater script supports the following options:
 | `-d`, `--dry-run` | Run in dry-run mode (simulates upgrade without making changes) | `bash update.sh -d -i 109 -v latest` |
 
 #### What the updater does:
-1. Stops the container (if it was running) and takes a safety configuration snapshot.
+1. Stops the container (if it was running) and takes a timestamped safety configuration snapshot. Older snapshots are kept, so remove them with `pct delsnapshot <id> <name>` once they pile up.
 2. Creates a temporary helper container from the newly pulled OCI template version.
 3. Mounts both filesystems and syncs the root filesystem from the new template to the active container using `rsync` (automatically preserving custom mount points, configuration, media directories, and all existing Proxmox snapshots).
 4. Synchronizes and updates the OCI container's entrypoint settings.
